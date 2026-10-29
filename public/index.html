@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Flash Sale</title>
+  <style>
+    body { font-family: system-ui, sans-serif; display: flex; justify-content: center; padding: 40px 16px; }
+    main { max-width: 420px; width: 100%; text-align: center; }
+    button { font-size: 18px; padding: 12px 28px; margin: 6px; border: 0; border-radius: 8px;
+             background: #2563eb; color: #fff; cursor: pointer; }
+    button:disabled { background: #9ca3af; cursor: not-allowed; }
+    #msg { min-height: 48px; font-size: 17px; }
+    #timer { font-size: 22px; font-weight: bold; }
+    small { color: #6b7280; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>📱 Phone Flash Sale</h1>
+  <p>Phones left: <strong id="stock">-</strong></p>
+  <button id="buy">Buy now</button>
+  <button id="pay" hidden>Pay now</button>
+  <p id="msg"></p>
+  <p id="timer"></p>
+  <small id="who"></small>
+</main>
+
+<script>
+  const $ = id => document.getElementById(id);
+  const userId = 'user-' + Math.random().toString(36).slice(2, 8); // pretend login
+  $('who').textContent = 'You are ' + userId;
+
+  let inFlight = false;   // the "request in flight" flag
+  let orderId = null;
+  let timerHandle = null;
+
+  const show = text => { $('msg').textContent = text; };
+  const unlockBuy = () => { inFlight = false; $('buy').disabled = false; };
+
+  // ---- BUY: lock the button on the very first click ----
+  $('buy').addEventListener('click', async () => {
+    if (inFlight) return;               // ignore extra clicks
+    inFlight = true;
+    $('buy').disabled = true;
+    show('Processing...');
+
+    try {
+      const ctrl = new AbortController();
+      const timeout = setTimeout(() => ctrl.abort(), 8000); // don't wait forever
+      const res = await fetch('/buy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId }),
+        signal: ctrl.signal
+      });
+      clearTimeout(timeout);
+      const data = await res.json();
+
+      if (res.status === 202) {                 // got a slot, keep the button locked
+        orderId = data.orderId;
+        show(`Order received (slot #${data.slot}), confirming...`);
+        poll(0);
+        return;
+      }
+      if (res.status === 410) show('Currently unavailable. Check back soon.');
+      else if (res.status === 409) show('You already have a phone reserved.');
+      else show('Something went wrong, try again.');
+    } catch (e) {
+      show('Something went wrong, try again.');
+    }
+    unlockBuy(); // re-enable on failure so the user is never stuck
+  });
+
+  // ---- POLL status with backoff + jitter ----
+  async function poll(attempt) {
+    try {
+      const res = await fetch('/status/' + orderId);
+      const data = await res.json();
+      if (data.status === 'confirmed') {
+        show('Confirmed! Your phone is held. Pay before the timer ends.');
+        $('pay').hidden = false;
+        startCountdown(data.expiresAt);
+        return;
+      }
+      if (data.status === 'rejected') {
+        show('Sorry, the order could not be completed.');
+        unlockBuy();
+        return;
+      }
+    } catch (e) { /* network blip: just try again */ }
+
+    const base = Math.min(300 * Math.pow(1.5, attempt), 3000); // backoff: wait longer each time
+    const jitter = Math.random() * base * 0.3;                  // jitter: a bit of randomness
+    setTimeout(() => poll(attempt + 1), base + jitter);
+  }
+
+  // ---- Reservation countdown ----
+  function startCountdown(expiresAt) {
+    clearInterval(timerHandle);
+    timerHandle = setInterval(() => {
+      const left = Math.max(0, Math.round((expiresAt - Date.now()) / 1000));
+      $('timer').textContent = left > 0
+        ? `Held for you: ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`
+        : 'Hold time is over';
+      if (left === 0) clearInterval(timerHandle);
+    }, 500);
+  }
+
+  // ---- PAY ----
+  $('pay').addEventListener('click', async () => {
+    const res = await fetch('/pay/' + orderId, { method: 'POST' });
+    const data = await res.json();
+    if (data.status === 'paid') {
+      show('Payment successful. Thank you!');
+      $('pay').hidden = true;
+      clearInterval(timerHandle);
+      $('timer').textContent = '';
+    } else if (data.status === 'late_refunded') {
+      show(data.message);
+      $('pay').hidden = true;
+      unlockBuy();
+    }
+  });
+
+  // ---- Live stock display ----
+  async function refreshStock() {
+    try {
+      const d = await (await fetch('/stock')).json();
+      $('stock').textContent = d.redisStock;
+    } catch (e) {}
+  }
+  refreshStock();
+  setInterval(refreshStock, 2000);
+</script>
+</body>
+</html>
